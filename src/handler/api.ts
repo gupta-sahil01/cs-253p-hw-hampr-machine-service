@@ -21,7 +21,13 @@ export class ApiHandler {
      * @throws An error if the token is invalid.
      */
     private checkToken(token: string) {
-        // Your implementation here
+        const idpClient = IdentityProviderClient.getInstance();
+        if (!idpClient.validateToken(token)) {
+            throw JSON.stringify({
+                statusCode: HttpResponseCode.UNAUTHORIZED,
+                message: 'Invalid token',
+            });
+        }
     }
 
     /**
@@ -34,7 +40,24 @@ export class ApiHandler {
      * @returns A response model with the status code and the reserved machine's state.
      */
     private handleRequestMachine(request: RequestMachineRequestModel): MachineResponseModel {
-        // Your implementation here
+        const machineTable = MachineStateTable.getInstance();
+        const availableMachines = machineTable.listMachinesAtLocation(request.locationId);
+        
+        const availableMachine = availableMachines.find(machine => machine.status === MachineStatus.AVAILABLE);
+        
+        if (!availableMachine) {
+            return { statusCode: HttpResponseCode.NOT_FOUND };
+        }
+        
+        machineTable.updateMachineStatus(availableMachine.machineId, MachineStatus.AWAITING_DROPOFF);
+        machineTable.updateMachineJobId(availableMachine.machineId, request.jobId);
+        
+        const updatedMachine = machineTable.getMachine(availableMachine.machineId);
+        if (updatedMachine) {
+            this.cache.put(updatedMachine.machineId, updatedMachine);
+        }
+        
+        return { statusCode: HttpResponseCode.OK, machine: updatedMachine };
     }
 
     /**
@@ -44,7 +67,20 @@ export class ApiHandler {
      * @returns A response model with the status code and the machine's state.
      */
     private handleGetMachine(request: GetMachineRequestModel): MachineResponseModel {
-        // Your implementation here
+        const cachedMachine = this.cache.get(request.machineId);
+        if (cachedMachine) {
+            return { statusCode: HttpResponseCode.OK, machine: cachedMachine };
+        }
+        
+        const machineTable = MachineStateTable.getInstance();
+        const machine = machineTable.getMachine(request.machineId);
+        
+        if (!machine) {
+            return { statusCode: HttpResponseCode.NOT_FOUND };
+        }
+        
+        this.cache.put(machine.machineId, machine);
+        return { statusCode: HttpResponseCode.OK, machine };
     }
 
     /**
@@ -55,7 +91,37 @@ export class ApiHandler {
      * @returns A response model with the status code and the updated machine's state.
      */
     private handleStartMachine(request: StartMachineRequestModel): MachineResponseModel {
-        // Your implementation here
+        const machineTable = MachineStateTable.getInstance();
+        const machine = machineTable.getMachine(request.machineId);
+        
+        if (!machine) {
+            return { statusCode: HttpResponseCode.NOT_FOUND };
+        }
+        
+        if (machine.status !== MachineStatus.AWAITING_DROPOFF) {
+            return { statusCode: HttpResponseCode.BAD_REQUEST, machine };
+        }
+        
+        try {
+            const smartMachineClient = SmartMachineClient.getInstance();
+            smartMachineClient.startCycle(request.machineId);
+            
+            machineTable.updateMachineStatus(request.machineId, MachineStatus.RUNNING);
+            
+            const updatedMachine = machineTable.getMachine(request.machineId);
+            if (updatedMachine) {
+                this.cache.put(updatedMachine.machineId, updatedMachine);
+            }
+            
+            return { statusCode: HttpResponseCode.OK, machine: updatedMachine };
+        } catch (error) {
+            machineTable.updateMachineStatus(request.machineId, MachineStatus.ERROR);
+            const errorMachine = machineTable.getMachine(request.machineId);
+            if (errorMachine) {
+                this.cache.put(errorMachine.machineId, errorMachine);
+            }
+            return { statusCode: HttpResponseCode.HARDWARE_ERROR, machine: errorMachine };
+        }
     }
 
     /**
@@ -85,7 +151,7 @@ export class ApiHandler {
             return this.handleStartMachine(startRequest);
         }
 
-        return { statusCode: HttpResponseCode.INTERNAL_SERVER_ERROR, machine: null };
+        return { statusCode: HttpResponseCode.INTERNAL_SERVER_ERROR };
     }
     
 }
